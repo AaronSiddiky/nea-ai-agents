@@ -340,12 +340,13 @@ class HarmonicClient:
             timeout: Request timeout in seconds
             max_retries: Maximum retry attempts for transient failures
         """
-        self.api_key = api_key or os.getenv("HARMONIC_API_KEY")
-        if not self.api_key:
+        raw_key = api_key or os.getenv("HARMONIC_API_KEY")
+        if not raw_key:
             raise ValueError(
                 "Harmonic API key required. Set HARMONIC_API_KEY environment variable "
                 "or pass api_key parameter."
             )
+        self.api_key = raw_key.strip()
 
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
@@ -431,10 +432,12 @@ class HarmonicClient:
                 dict(response.headers),
             )
 
-            if response.status_code == 401:
-                # Permanent error - don't retry
+            if response.status_code in (401, 403):
+                # Permanent auth error - don't retry
                 self._circuit_breaker.record_failure()
-                raise HarmonicAPIError("Invalid API key", status_code=401)
+                error_data = response.json() if response.content else {}
+                msg = error_data.get("message", "Invalid or missing API key")
+                raise HarmonicAPIError(msg, status_code=response.status_code)
             elif response.status_code == 404:
                 # Not found is not a failure, just no data
                 return {}
