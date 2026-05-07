@@ -319,7 +319,7 @@ class OutreachFeedbackRequest(BaseModel):
     )
     investor_key: str = Field(..., description="Investor key, e.g. 'ashley'")
     company_id: str = Field(..., description="Company domain, e.g. 'stripe.com'")
-    context_type: str = Field(..., description="Context type used during generation")
+    context_type: Optional[str] = Field(default=None, description="Context type used during generation")
     original_message: str = Field(..., description="The message as originally generated")
     edited_message: Optional[str] = Field(
         default=None,

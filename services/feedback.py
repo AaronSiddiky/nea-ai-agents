@@ -38,7 +38,7 @@ class FeedbackRecord:
 
     investor_key: str
     company_id: str
-    context_type: str
+    context_type: Optional[str]
     original_message: str
     approval_status: str           # 'approved' | 'edited' | 'rejected'
     outreach_id: Optional[str] = None

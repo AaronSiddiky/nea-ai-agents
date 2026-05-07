@@ -85,6 +85,16 @@ export default function OutreachPage() {
     setTimeout(() => setCopied(false), 2000);
   }, [result]);
 
+  const openInOutlook = useCallback(() => {
+    const body = fbMode === "editing" ? edited : (result?.message ?? "");
+    const subject = result?.subject ?? "";
+    const url =
+      "https://outlook.office.com/mail/deeplink/compose" +
+      "?subject=" + encodeURIComponent(subject) +
+      "&body=" + encodeURIComponent(body);
+    window.open(url, "_blank", "noopener,noreferrer");
+  }, [result, fbMode, edited]);
+
   const selInv = INVESTORS.find(i => i.key === investor);
 
   return (
@@ -276,6 +286,15 @@ export default function OutreachPage() {
                   className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-zinc-200 text-xs font-medium text-zinc-500 hover:border-zinc-300 hover:text-zinc-700 transition-colors">
                   {copied ? "✓ Copied" : "Copy"}
                 </button>
+                {format === "email" && (
+                  <button onClick={openInOutlook}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-zinc-200 text-xs font-medium text-zinc-500 hover:border-zinc-300 hover:text-zinc-700 transition-colors">
+                    <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+                    </svg>
+                    Open in Outlook
+                  </button>
+                )}
                 <div className="flex items-center gap-1.5 ml-auto">
                   {fbMode === "editing" ? (
                     <>

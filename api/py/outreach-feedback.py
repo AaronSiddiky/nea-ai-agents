@@ -95,8 +95,8 @@ def _save(request: OutreachFeedbackRequest) -> OutreachFeedbackResponse:
     try:
         record_id = save_feedback(record)
     except Exception as exc:
-        logger.error("Failed to save outreach feedback: %s", exc)
-        raise HTTPException(status_code=500, detail="Failed to save feedback")
+        logger.error("Failed to save outreach feedback: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to save feedback: {exc}")
 
     return OutreachFeedbackResponse(
         id=record_id,
