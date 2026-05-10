@@ -5,11 +5,10 @@ build-backend = "setuptools.backends.legacy:build"
 [project]
 name = "talent-placement"
 version = "0.1.0"
-requires-python = ">=3.11"
+requires-python = ">=3.9"
 dependencies = [
     "anthropic",
     "requests",
-    "streamlit",
     "python-dotenv",
     "pydantic",
     "sqlite-utils",

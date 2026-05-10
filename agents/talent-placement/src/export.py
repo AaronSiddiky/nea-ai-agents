@@ -3,6 +3,7 @@
 When the outreach agent is ready, replace export_match() with
 send_to_outreach(match) -> handoff_id. The call site in app.py stays the same.
 """
+from __future__ import annotations
 
 import json
 from datetime import datetime

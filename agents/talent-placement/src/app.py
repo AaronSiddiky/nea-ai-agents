@@ -1,134 +1,104 @@
-"""Streamlit UI — single-partner, single-company workflow."""
+"""CLI entry point for the talent placement agent."""
+from __future__ import annotations
 
-import streamlit as st
+import argparse
+import sys
+from pathlib import Path
 from .harmonic import get_company_employees
 from .roster import load_job_reqs
 from .matching import rank_matches
 from .export import export_match
 from .store import init_db, log_match
 
-st.set_page_config(page_title="NEA Talent Placement", layout="wide")
+_DEFAULT_PORTCO_CSV = Path.home() / "Desktop" / "Active Portco (LU March 2026) (1).csv"
 
 
-def _match_key(employee_id: str, dest_id: str) -> str:
-    return f"match_{employee_id}_{dest_id}"
+def _prompt(msg: str) -> str:
+    try:
+        return input(msg)
+    except (KeyboardInterrupt, EOFError):
+        print("\nAborted.")
+        sys.exit(0)
+
+
+def run(company_name: str, harmonic_id: str, top_n: int = 5) -> None:
+    init_db()
+
+    print(f"\nFetching employees for {company_name} from Harmonic...")
+    employees = get_company_employees(harmonic_id)
+    if not employees:
+        print("No employees found. Check the company ID or your HARMONIC_API_KEY.")
+        sys.exit(1)
+
+    print(f"Found {len(employees)} employees.\n")
+
+    destinations = load_job_reqs()
+    if not destinations:
+        print("No job reqs found. Add rows to data/job_reqs.csv and re-run.")
+        sys.exit(1)
+
+    print(f"Loaded {len(destinations)} open roles.\n")
+    print("=" * 60)
+
+    for emp in employees:
+        badge = " [FOUNDER]" if emp.is_founder else (" [EXEC]" if emp.is_executive else "")
+        print(f"\n{emp.name}{badge} — {emp.title or 'Unknown title'}")
+        if emp.linkedin_url:
+            print(f"  LinkedIn: {emp.linkedin_url}")
+
+        print("  Scoring matches with Claude...")
+        matches = rank_matches(emp, destinations, top_n=top_n)
+
+        if not matches:
+            print("  No matches found.")
+            continue
+
+        for i, match in enumerate(matches, 1):
+            score_pct = int(match.score * 100)
+            print(f"\n  [{i}] {match.destination.role} @ {match.destination.company}  —  {score_pct}%")
+            print(f"      {match.reasoning}")
+
+        answer = _prompt("\n  Approve any matches? Enter numbers (e.g. 1,3) or press Enter to skip: ").strip()
+        if not answer:
+            continue
+
+        for part in answer.split(","):
+            part = part.strip()
+            if part.isdigit():
+                idx = int(part) - 1
+                if 0 <= idx < len(matches):
+                    match = matches[idx]
+                    notes = _prompt(f"  Notes for {match.destination.role} @ {match.destination.company} (optional): ").strip()
+                    match.approved = True
+                    match.partner_notes = notes or None
+                    log_match(match)
+                    path = export_match(match)
+                    print(f"  Exported → {path}")
+
+    print("\nDone.")
 
 
 def main() -> None:
-    init_db()
-    st.title("NEA Talent Placement")
+    parser = argparse.ArgumentParser(description="NEA Talent Placement CLI")
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--portco", action="store_true", help="Pick a company interactively from the NEA portco list")
+    group.add_argument("--company", help="Company domain or Harmonic ID (e.g. stripe.com or 4292875)")
+    parser.add_argument("--portco-csv", help="Path to portco CSV (default: ~/Desktop/Active Portco...csv)")
+    parser.add_argument("--top", type=int, default=5, help="Top N matches per employee (default: 5)")
+    args = parser.parse_args()
 
-    # --- Company input ---
-    company_domain = st.text_input(
-        "Portfolio company domain",
-        placeholder="e.g. stripe.com",
-        help="Harmonic will look up current employees for this domain.",
-    )
-
-    if not company_domain:
-        st.info("Enter a company domain above to begin.")
-        st.stop()
-
-    # --- Load employees ---
-    if "employees" not in st.session_state or st.session_state.get("loaded_company") != company_domain:
-        with st.spinner(f"Fetching employees from Harmonic for {company_domain}…"):
-            employees = get_company_employees(company_domain)
-        if not employees:
-            st.error(f"No employees found for **{company_domain}**. Check the domain or your Harmonic API key.")
-            st.stop()
-        st.session_state["employees"] = employees
-        st.session_state["loaded_company"] = company_domain
-        st.session_state["matches"] = {}
-
-    employees = st.session_state["employees"]
-
-    # --- Load job reqs ---
-    destinations = load_job_reqs()
-    if not destinations:
-        st.warning(
-            "No job reqs found. Add rows to `data/job_reqs.csv` "
-            "(columns: company, role, description, contact_name, contact_email)."
-        )
-
-    st.caption(f"{len(employees)} employees · {len(destinations)} open roles")
-    st.divider()
-
-    # --- Main dashboard: one card per employee ---
-    for emp in employees:
-        with st.container(border=True):
-            col1, col2 = st.columns([1, 3])
-
-            with col1:
-                badge = "🔑 Founder" if emp.is_founder else ("👔 Exec" if emp.is_executive else "")
-                st.markdown(f"**{emp.name}** {badge}")
-                st.caption(emp.title or "Unknown title")
-                if emp.linkedin_url:
-                    st.markdown(f"[LinkedIn]({emp.linkedin_url})")
-
-            with col2:
-                if not destinations:
-                    st.caption("No job reqs loaded.")
-                    continue
-
-                # Score matches on demand
-                if emp.id not in st.session_state["matches"]:
-                    if st.button(f"Find matches", key=f"run_{emp.id}"):
-                        with st.spinner("Scoring with Claude…"):
-                            matches = rank_matches(emp, destinations, top_n=5)
-                        st.session_state["matches"][emp.id] = matches
-                        st.rerun()
-                    continue
-
-                matches = st.session_state["matches"][emp.id]
-                if not matches:
-                    st.caption("No matches found.")
-                    continue
-
-                for match in matches:
-                    mkey = _match_key(emp.id, match.destination.id)
-                    already_approved = st.session_state.get(f"approved_{mkey}", False)
-
-                    mcol1, mcol2, mcol3 = st.columns([2, 3, 1])
-                    with mcol1:
-                        score_pct = int(match.score * 100)
-                        color = "green" if score_pct >= 70 else ("orange" if score_pct >= 40 else "red")
-                        st.markdown(
-                            f"**{match.destination.role}** @ {match.destination.company}  \n"
-                            f":{color}[{score_pct}% match]"
-                        )
-                    with mcol2:
-                        st.caption(match.reasoning)
-                        notes = st.text_input(
-                            "Partner notes",
-                            key=f"notes_{mkey}",
-                            label_visibility="collapsed",
-                            placeholder="Add notes (optional)",
-                            disabled=already_approved,
-                        )
-                    with mcol3:
-                        if already_approved:
-                            st.success("Approved ✓")
-                        else:
-                            if st.button("Approve", key=f"approve_{mkey}"):
-                                match.approved = True
-                                match.partner_notes = notes or None
-                                log_match(match)
-                                path = export_match(match)
-                                st.session_state[f"approved_{mkey}"] = True
-                                st.toast(f"Exported to {path.name}")
-                                st.rerun()
-
-    # --- Sidebar: approved exports ---
-    with st.sidebar:
-        st.header("Approved matches")
-        from .store import get_approved_matches
-        approved = get_approved_matches()
-        if not approved:
-            st.caption("None yet.")
-        for m in approved:
-            st.markdown(f"**{m.employee.name}** → {m.destination.role} @ {m.destination.company}")
-            if m.partner_notes:
-                st.caption(m.partner_notes)
+    if args.portco:
+        from .portco import load_portcos, pick_company
+        csv_path = args.portco_csv or _DEFAULT_PORTCO_CSV
+        if not Path(csv_path).exists():
+            print(f"Portco CSV not found at: {csv_path}")
+            print("Pass the path with --portco-csv /path/to/file.csv")
+            sys.exit(1)
+        companies = load_portcos(csv_path)
+        selected = pick_company(companies)
+        run(selected.name, selected.harmonic_id, top_n=args.top)
+    else:
+        run(args.company, args.company, top_n=args.top)
 
 
 if __name__ == "__main__":

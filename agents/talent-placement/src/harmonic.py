@@ -1,4 +1,5 @@
 """All Harmonic API calls live here. No Harmonic calls anywhere else."""
+from __future__ import annotations
 
 import os
 import logging

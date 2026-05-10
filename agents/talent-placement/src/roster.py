@@ -1,4 +1,5 @@
 """Load NEA portfolio job reqs from data/job_reqs.csv."""
+from __future__ import annotations
 
 import csv
 import uuid
