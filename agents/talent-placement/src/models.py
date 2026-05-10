@@ -4,10 +4,13 @@ from pydantic import BaseModel
 class Employee(BaseModel):
     id: str
     name: str
-    title: str
+    title: str | None = None
     company: str
     linkedin_url: str | None = None
     email: str | None = None
+    is_founder: bool = False
+    is_executive: bool = False
+    start_date: str | None = None
 
 
 class Destination(BaseModel):
