@@ -31,7 +31,7 @@ def rank_matches(
         return []
 
     roles_text = "\n".join(
-        f"{i+1}. {d.role} @ {d.company}: {d.description or 'No description'}"
+        f"{i+1}. {d.role} @ {d.company}" + (f" ({d.location})" if d.location else "")
         for i, d in enumerate(destinations)
     )
 

@@ -8,7 +8,7 @@ from .models import Destination
 
 _DEFAULT_PATH = Path(__file__).parent.parent / "data" / "job_reqs.csv"
 
-_REQUIRED_COLUMNS = {"company", "role"}
+_REQUIRED_COLUMNS = {"company", "title"}
 
 
 def load_job_reqs(path: Path = _DEFAULT_PATH) -> list[Destination]:
@@ -26,9 +26,8 @@ def load_job_reqs(path: Path = _DEFAULT_PATH) -> list[Destination]:
                 id=str(uuid.uuid4()),
                 type="job_req",
                 company=row["company"].strip(),
-                role=row["role"].strip(),
-                description=row.get("description", "").strip() or None,
-                contact_name=row.get("contact_name", "").strip() or None,
-                contact_email=row.get("contact_email", "").strip() or None,
+                role=row["title"].strip(),
+                location=row.get("location", "").strip() or None,
+                url=row.get("url", "").strip() or None,
             ))
     return destinations

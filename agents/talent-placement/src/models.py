@@ -20,6 +20,8 @@ class Destination(BaseModel):
     company: str
     role: str
     description: str | None = None
+    location: str | None = None
+    url: str | None = None
     contact_name: str | None = None
     contact_email: str | None = None
 
