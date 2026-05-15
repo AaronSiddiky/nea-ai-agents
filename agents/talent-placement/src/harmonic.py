@@ -150,6 +150,31 @@ def get_company_employees(company_identifier: str, limit: int = 30) -> list[Empl
     return employees
 
 
+def get_person_by_linkedin(linkedin_url: str) -> Employee | None:
+    """Look up a person in Harmonic by their LinkedIn URL."""
+    try:
+        data = _get("/search/typeahead", params={"query": linkedin_url, "numResults": 5})
+        person_id = None
+        for result in data.get("results", []):
+            if result.get("type") == "PERSON" and "person:" in result.get("entity_urn", ""):
+                person_id = result["entity_urn"].split("person:")[-1]
+                break
+        if not person_id:
+            logger.warning("No Harmonic record found for: %s", linkedin_url)
+            return None
+        person_data = _get(f"/persons/{person_id}")
+        current_company = ""
+        for exp in person_data.get("experience", []) or []:
+            if exp.get("is_current_position"):
+                c = exp.get("company")
+                current_company = c.get("name") if isinstance(c, dict) else (exp.get("company_name") or "")
+                break
+        return _parse_person(person_data, current_company or "Unknown")
+    except Exception as e:
+        logger.error("get_person_by_linkedin failed for %s: %s", linkedin_url, e)
+        return None
+
+
 def _parse_destination_person(data: dict) -> dict:
     name = data.get("full_name") or data.get("name") or "Unknown"
 
