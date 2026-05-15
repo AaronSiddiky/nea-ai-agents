@@ -9,6 +9,7 @@ from .roster import load_job_reqs
 from .matching import rank_matches
 from .export import export_match
 from .store import init_db, log_match
+from .scraper import scrape as refresh_job_reqs
 
 _DEFAULT_PORTCO_CSV = Path.home() / "Desktop" / "Active Portco (LU March 2026) (1).csv"
 
@@ -23,6 +24,9 @@ def _prompt(msg: str) -> str:
 
 def run(company_name: str, harmonic_id: str, top_n: int = 5) -> None:
     init_db()
+
+    print("Refreshing NEA portfolio job listings...")
+    refresh_job_reqs()
 
     print(f"\nFetching employees for {company_name} from Harmonic...")
     employees = get_company_employees(harmonic_id)
