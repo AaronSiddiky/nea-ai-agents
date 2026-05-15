@@ -113,9 +113,44 @@ def run_linkedin(linkedin_urls: list[str], top_n: int = 5) -> None:
     print("\nDone.")
 
 
+def _pick_mode_interactive(portco_csv: str | None, top_n: int) -> None:
+    """Ask the user whether they're working from a company or LinkedIn URLs."""
+    print("\nNEA Talent Placement\n")
+    print("  [1] Portfolio company (pick from list)")
+    print("  [2] LinkedIn profile(s) (paste URL(s))")
+    print()
+    while True:
+        choice = _prompt("Choose [1/2]: ").strip()
+        if choice == "1":
+            from .portco import load_portcos, pick_company
+            csv_path = portco_csv or _DEFAULT_PORTCO_CSV
+            if not Path(csv_path).exists():
+                print(f"Portco CSV not found at: {csv_path}")
+                print("Pass the path with --portco-csv /path/to/file.csv")
+                sys.exit(1)
+            companies = load_portcos(csv_path)
+            selected = pick_company(companies)
+            run(selected.name, selected.harmonic_id, top_n=top_n)
+            return
+        if choice == "2":
+            print("\nPaste LinkedIn URLs one per line. Press Enter on a blank line when done.\n")
+            urls = []
+            while True:
+                url = _prompt("  URL: ").strip()
+                if not url:
+                    break
+                urls.append(url)
+            if not urls:
+                print("No URLs entered.")
+                sys.exit(1)
+            run_linkedin(urls, top_n=top_n)
+            return
+        print("  Please enter 1 or 2.")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="NEA Talent Placement CLI")
-    group = parser.add_mutually_exclusive_group(required=True)
+    group = parser.add_mutually_exclusive_group()
     group.add_argument("--portco", action="store_true", help="Pick a company interactively from the NEA portco list")
     group.add_argument("--company", help="Company domain or Harmonic ID (e.g. stripe.com or 4292875)")
     group.add_argument("--linkedin", nargs="+", metavar="URL", help="One or more LinkedIn profile URLs to match directly")
@@ -135,8 +170,10 @@ def main() -> None:
         run(selected.name, selected.harmonic_id, top_n=args.top)
     elif args.linkedin:
         run_linkedin(args.linkedin, top_n=args.top)
-    else:
+    elif args.company:
         run(args.company, args.company, top_n=args.top)
+    else:
+        _pick_mode_interactive(args.portco_csv, args.top)
 
 
 if __name__ == "__main__":
