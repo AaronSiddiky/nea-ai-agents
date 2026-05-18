@@ -14,6 +14,16 @@ from .scraper import scrape as refresh_job_reqs
 _DEFAULT_PORTCO_CSV = Path.home() / "Desktop" / "Active Portco (LU March 2026) (1).csv"
 
 
+def _fit_label(score_pct: int) -> str:
+    if score_pct >= 80:
+        return "✓ Strong fit"
+    if score_pct >= 60:
+        return "✓ Good fit"
+    if score_pct >= 40:
+        return "~ Possible fit"
+    return "✗ Weak fit"
+
+
 def _prompt(msg: str) -> str:
     try:
         return input(msg)
@@ -39,10 +49,19 @@ def _match_and_approve(employees: list, destinations: list, top_n: int) -> None:
 
         for i, match in enumerate(matches, 1):
             score_pct = int(match.score * 100)
-            print(f"\n  [{i}] {match.destination.role} @ {match.destination.company}  —  {score_pct}%")
+            label = _fit_label(score_pct)
+            print(f"\n  [{i}] {match.destination.role} @ {match.destination.company}  —  {score_pct}%  {label}")
             print(f"      {match.reasoning}")
 
-        answer = _prompt("\n  Approve any matches? Enter numbers (e.g. 1,3) or press Enter to skip: ").strip()
+        answer = _prompt(
+            "\n  To send an intro for a match, enter its number(s) below."
+            "\n  Example: entering '1' approves the top match. Entering '1,3' approves"
+            "\n  match 1 and match 3. Press Enter to skip all and move to the next person."
+            "\n"
+            "\n  Score guide: 80-100% Strong fit  |  60-79% Good fit  |  40-59% Possible fit  |  <40 Weak fit"
+            "\n"
+            "\n  Approve matches: "
+        ).strip()
         if not answer:
             continue
 
@@ -70,7 +89,7 @@ def _load_destinations() -> list:
     return destinations
 
 
-def run(company_name: str, harmonic_id: str, top_n: int = 5) -> None:
+def run(company_name: str, harmonic_id: str, top_n: int = 10) -> None:
     init_db()
 
     print("Refreshing NEA portfolio job listings...")
@@ -88,7 +107,7 @@ def run(company_name: str, harmonic_id: str, top_n: int = 5) -> None:
     print("\nDone.")
 
 
-def run_linkedin(linkedin_urls: list[str], top_n: int = 5) -> None:
+def run_linkedin(linkedin_urls: list[str], top_n: int = 10) -> None:
     init_db()
 
     print("Refreshing NEA portfolio job listings...")
@@ -168,7 +187,7 @@ def main() -> None:
     group.add_argument("--linkedin", nargs="+", metavar="URL", help="One or more LinkedIn profile URLs to match directly")
     group.add_argument("--linkedin-file", metavar="FILE", help="Path to a text file with one LinkedIn URL per line")
     parser.add_argument("--portco-csv", help="Path to portco CSV (default: ~/Desktop/Active Portco...csv)")
-    parser.add_argument("--top", type=int, default=5, help="Top N matches per employee (default: 5)")
+    parser.add_argument("--top", type=int, default=10, help="Top N matches per employee (default: 10)")
     args = parser.parse_args()
 
     if args.portco:
