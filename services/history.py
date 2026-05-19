@@ -606,7 +606,7 @@ def cleanup_old_job_runs(keep_days: int = DEFAULT_RETENTION_DAYS) -> int:
     """Delete job runs older than N days. Returns count deleted."""
     supabase = get_supabase()
     cutoff = (datetime.now(timezone.utc) - timedelta(days=keep_days)).isoformat()
-    result = supabase.table("job_runs").delete().lt("created_at", cutoff).execute()
+    result = supabase.table("databricks_job_runs").delete().lt("created_at", cutoff).execute()
     count = len(result.data)
     if count > 0:
         logger.info(f"Cleaned up {count} job runs older than {keep_days} days")

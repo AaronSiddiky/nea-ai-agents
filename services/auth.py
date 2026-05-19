@@ -1,16 +1,18 @@
 """
-Authentication utilities for Clerk JWT verification.
+Authentication utilities for JWT verification.
 
-Phase 3.1: Replaces X-NEA-Key shared secret with proper JWT authentication.
+Supports two JWT modes (set via env feature flags):
+    USE_SUPABASE_AUTH=true  -> verify HS256 Supabase user tokens via SUPABASE_JWT_SECRET (preferred)
+    USE_CLERK_AUTH=true     -> verify RS256 Clerk tokens via CLERK_JWKS_URL (legacy)
+
+If both are off, the legacy X-NEA-Key shared secret guard (in services/api.py
+middleware) is used. If both are on, Supabase is tried first.
 
 Usage:
-    from services.auth import USE_CLERK_AUTH, verify_clerk_token, get_user_id
-
-    # In middleware:
-    if USE_CLERK_AUTH:
-        user_id = get_user_id(request)
-        if not user_id:
-            return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
+    from services.auth import (
+        USE_SUPABASE_AUTH, USE_CLERK_AUTH,
+        verify_supabase_token, verify_clerk_token, get_user_id,
+    )
 """
 
 import os
@@ -22,11 +24,56 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-# Feature flag for Clerk authentication
+# Feature flags
 USE_CLERK_AUTH = os.getenv("USE_CLERK_AUTH", "false").lower() == "true"
+USE_SUPABASE_AUTH = os.getenv("USE_SUPABASE_AUTH", "false").lower() == "true"
 
 # Clerk JWKS URL for fetching public keys
 CLERK_JWKS_URL = os.getenv("CLERK_JWKS_URL")
+
+# Supabase HS256 JWT signing secret (project-level, from Supabase dashboard ->
+# Settings -> API -> JWT Settings). Used to verify user-issued tokens.
+SUPABASE_JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET")
+
+
+def verify_supabase_token(token: str) -> Optional[dict]:
+    """
+    Verify a Supabase user JWT (HS256) and return its claims.
+
+    Supabase issues HS256 JWTs signed with the project's JWT secret. The `sub`
+    claim is the `auth.users.id` UUID, which is the canonical NEA user_id.
+
+    Args:
+        token: The JWT token string (without "Bearer " prefix).
+
+    Returns:
+        Dict of JWT claims if valid, None if invalid / expired / misconfigured.
+    """
+    if not SUPABASE_JWT_SECRET:
+        logger.warning("SUPABASE_JWT_SECRET not set, Supabase auth will fail")
+        return None
+    try:
+        import jwt
+    except ImportError:
+        logger.error("PyJWT not installed. Run: pip install pyjwt")
+        return None
+    try:
+        claims = jwt.decode(
+            token,
+            SUPABASE_JWT_SECRET,
+            algorithms=["HS256"],
+            audience="authenticated",
+        )
+        return claims
+    except jwt.ExpiredSignatureError:
+        logger.warning("Supabase JWT expired")
+        return None
+    except jwt.InvalidTokenError as e:
+        logger.warning(f"Invalid Supabase JWT: {e}")
+        return None
+    except Exception as e:
+        logger.error(f"Unexpected error verifying Supabase JWT: {e}")
+        return None
 
 
 @lru_cache(maxsize=1)
@@ -123,26 +170,34 @@ def verify_clerk_token(token: str) -> Optional[dict]:
 
 def get_user_id(request) -> Optional[str]:
     """
-    Extract user_id from request, supporting both Clerk and legacy auth.
+    Extract user_id from request, supporting Supabase, Clerk, or neither.
+
+    Resolution order:
+        1. If USE_SUPABASE_AUTH is on, try HS256 verification (returns auth.users.id UUID).
+        2. If USE_CLERK_AUTH is on, try RS256 verification (returns Clerk user id).
+        3. Otherwise return None.
 
     Args:
         request: FastAPI Request object
 
     Returns:
-        Clerk user ID (sub claim) if authenticated, None otherwise.
+        User ID (sub claim) if authenticated, None otherwise.
     """
-    if not USE_CLERK_AUTH:
-        return None
-
     auth_header = request.headers.get("Authorization", "")
     if not auth_header.startswith("Bearer "):
         return None
 
-    token = auth_header[7:]  # Remove "Bearer " prefix
-    claims = verify_clerk_token(token)
+    token = auth_header[7:]
 
-    if claims:
-        return claims.get("sub")  # Clerk user ID is in 'sub' claim
+    if USE_SUPABASE_AUTH:
+        claims = verify_supabase_token(token)
+        if claims:
+            return claims.get("sub")
+
+    if USE_CLERK_AUTH:
+        claims = verify_clerk_token(token)
+        if claims:
+            return claims.get("sub")
 
     return None
 

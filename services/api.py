@@ -87,10 +87,16 @@ app.add_middleware(
 )
 logger.info(f"CORS allowlist: {ALLOWED_ORIGINS}")
 
-# Import auth utilities (Phase 3.1)
-from services.auth import USE_CLERK_AUTH, verify_clerk_token, get_user_id
+# Import auth utilities (Phase 3.1 + NEA merge: Supabase HS256 added)
+from services.auth import (
+    USE_CLERK_AUTH,
+    USE_SUPABASE_AUTH,
+    verify_clerk_token,
+    verify_supabase_token,
+    get_user_id,
+)
 
-# Interim shared-secret guard on write endpoints (legacy, replaced by Clerk in Phase 3).
+# Interim shared-secret guard on write endpoints (legacy, replaced by JWT auth).
 NEA_API_KEY = os.getenv("NEA_API_KEY")
 _PROTECTED_METHODS = {"POST", "DELETE", "PUT", "PATCH"}
 _PROTECTED_PATH_PREFIX = "/api/"
@@ -102,17 +108,18 @@ async def require_auth(request: Request, call_next):
     """
     Gate write endpoints on authentication.
 
-    Phase 3.1: Supports dual-mode auth controlled by USE_CLERK_AUTH env var.
-    - USE_CLERK_AUTH=true: Requires Bearer token with Clerk JWT
-    - USE_CLERK_AUTH=false: Uses legacy X-NEA-Key shared secret
+    Resolution order on protected requests:
+        1. USE_SUPABASE_AUTH=true -> Bearer Supabase HS256 token (preferred, NEA Scout merge).
+           `sub` claim becomes request.state.user_id (auth.users.id UUID).
+        2. USE_CLERK_AUTH=true -> Bearer Clerk RS256 token (legacy).
+        3. Fallback to X-NEA-Key shared secret if NEA_API_KEY is set.
     """
     if (
         request.method in _PROTECTED_METHODS
         and request.url.path.startswith(_PROTECTED_PATH_PREFIX)
         and request.url.path not in _UNPROTECTED_PATHS
     ):
-        if USE_CLERK_AUTH:
-            # Clerk JWT authentication
+        if USE_SUPABASE_AUTH or USE_CLERK_AUTH:
             auth_header = request.headers.get("Authorization", "")
             if not auth_header.startswith("Bearer "):
                 logger.warning(
@@ -121,8 +128,12 @@ async def require_auth(request: Request, call_next):
                 )
                 return _json_error(401, "Missing Authorization header")
 
-            token = auth_header[7:]  # Remove "Bearer " prefix
-            claims = verify_clerk_token(token)
+            token = auth_header[7:]
+            claims = None
+            if USE_SUPABASE_AUTH:
+                claims = verify_supabase_token(token)
+            if not claims and USE_CLERK_AUTH:
+                claims = verify_clerk_token(token)
             if not claims:
                 logger.warning(
                     "Rejected %s %s — invalid or expired token",
@@ -130,7 +141,6 @@ async def require_auth(request: Request, call_next):
                 )
                 return _json_error(401, "Invalid or expired token")
 
-            # Attach user_id to request state for downstream use
             request.state.user_id = claims.get("sub")
             logger.info(f"Authenticated user: {request.state.user_id}")
 
