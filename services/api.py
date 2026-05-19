@@ -83,21 +83,19 @@ app.add_middleware(
     allow_origins=ALLOWED_ORIGINS,
     allow_credentials=False,
     allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
-    allow_headers=["Content-Type", "X-NEA-Key", "Authorization"],
+    allow_headers=["Content-Type", "Authorization"],
 )
 logger.info(f"CORS allowlist: {ALLOWED_ORIGINS}")
 
-# Import auth utilities (Phase 3.1 + NEA merge: Supabase HS256 added)
+# Import auth utilities. Post-NEA merge (M5): Supabase HS256 is the only
+# accepted auth scheme. Clerk RS256 and the legacy X-NEA-Key shared secret
+# have been removed.
 from services.auth import (
-    USE_CLERK_AUTH,
     USE_SUPABASE_AUTH,
-    verify_clerk_token,
     verify_supabase_token,
     get_user_id,
 )
 
-# Interim shared-secret guard on write endpoints (legacy, replaced by JWT auth).
-NEA_API_KEY = os.getenv("NEA_API_KEY")
 _PROTECTED_METHODS = {"POST", "DELETE", "PUT", "PATCH"}
 _PROTECTED_PATH_PREFIX = "/api/"
 _UNPROTECTED_PATHS = {"/", "/health"}
@@ -109,13 +107,14 @@ _INTERNAL_PATH_PREFIX = "/api/internal/"
 @app.middleware("http")
 async def require_auth(request: Request, call_next):
     """
-    Gate write endpoints on authentication.
+    Gate write endpoints on Supabase JWT auth.
 
-    Resolution order on protected requests:
-        1. USE_SUPABASE_AUTH=true -> Bearer Supabase HS256 token (preferred, NEA Scout merge).
-           `sub` claim becomes request.state.user_id (auth.users.id UUID).
-        2. USE_CLERK_AUTH=true -> Bearer Clerk RS256 token (legacy).
-        3. Fallback to X-NEA-Key shared secret if NEA_API_KEY is set.
+    Protected POST/DELETE/PUT/PATCH under /api/ (excluding /api/internal/*)
+    require an `Authorization: Bearer <supabase_jwt>` header. The token's
+    `sub` claim is the `auth.users.id` UUID and becomes
+    `request.state.user_id`.
+
+    /api/internal/* is gated by `X-NEA-Internal-Token` in the route handler.
     """
     if (
         request.method in _PROTECTED_METHODS
@@ -123,40 +122,34 @@ async def require_auth(request: Request, call_next):
         and not request.url.path.startswith(_INTERNAL_PATH_PREFIX)
         and request.url.path not in _UNPROTECTED_PATHS
     ):
-        if USE_SUPABASE_AUTH or USE_CLERK_AUTH:
-            auth_header = request.headers.get("Authorization", "")
-            if not auth_header.startswith("Bearer "):
-                logger.warning(
-                    "Rejected %s %s — missing Authorization header",
-                    request.method, request.url.path,
-                )
-                return _json_error(401, "Missing Authorization header")
+        if not USE_SUPABASE_AUTH:
+            # If someone deploys with USE_SUPABASE_AUTH=false we hard-fail
+            # rather than silently opening every write endpoint to the world.
+            logger.error(
+                "USE_SUPABASE_AUTH must be true post-M5; refusing %s %s",
+                request.method, request.url.path,
+            )
+            return _json_error(503, "Server misconfigured: Supabase auth disabled")
 
-            token = auth_header[7:]
-            claims = None
-            if USE_SUPABASE_AUTH:
-                claims = verify_supabase_token(token)
-            if not claims and USE_CLERK_AUTH:
-                claims = verify_clerk_token(token)
-            if not claims:
-                logger.warning(
-                    "Rejected %s %s — invalid or expired token",
-                    request.method, request.url.path,
-                )
-                return _json_error(401, "Invalid or expired token")
+        auth_header = request.headers.get("Authorization", "")
+        if not auth_header.startswith("Bearer "):
+            logger.warning(
+                "Rejected %s %s — missing Authorization header",
+                request.method, request.url.path,
+            )
+            return _json_error(401, "Missing Authorization header")
 
-            request.state.user_id = claims.get("sub")
-            logger.info(f"Authenticated user: {request.state.user_id}")
+        token = auth_header[7:]
+        claims = verify_supabase_token(token)
+        if not claims:
+            logger.warning(
+                "Rejected %s %s — invalid or expired token",
+                request.method, request.url.path,
+            )
+            return _json_error(401, "Invalid or expired token")
 
-        elif NEA_API_KEY:
-            # Legacy X-NEA-Key authentication
-            provided = request.headers.get("x-nea-key", "")
-            if not hmac.compare_digest(provided, NEA_API_KEY):
-                logger.warning(
-                    "Rejected %s %s — missing/invalid X-NEA-Key",
-                    request.method, request.url.path,
-                )
-                return _json_error(401, "Missing or invalid X-NEA-Key")
+        request.state.user_id = claims.get("sub")
+        logger.info(f"Authenticated user: {request.state.user_id}")
 
     return await call_next(request)
 

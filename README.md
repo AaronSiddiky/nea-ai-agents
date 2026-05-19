@@ -1,13 +1,27 @@
 # NEA AI Agents
 
+> **Merged into the NEA Scout monorepo.** This fork is the live source for
+> the Python agent service hosted on Railway as `nea-agents`; everything
+> else (the standalone Next.js frontend, the Vercel deployment, the
+> separate Supabase project) is decommissioned in favour of the
+> [NEA Scout monorepo](https://github.com/AaronSiddiky/neatracker). See
+> `supabase/migrations/040_stanford_base_schema.sql` through `050_*.sql`
+> in that repo for the unified data model, and `merge-nea-ai-agents` plan
+> for the integration history.
+>
+> Auth: Supabase HS256 JWTs only (legacy X-NEA-Key and Clerk RS256 removed
+> in M5). Internal cron triggers use `X-NEA-Internal-Token`. Frontend
+> requests are proxied through `app/api/agents/[...path]/route.ts` in
+> the monorepo.
+
 ![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)
-![Next.js 16](https://img.shields.io/badge/next.js-16-black.svg)
-![Vercel](https://img.shields.io/badge/deploy-vercel-000000.svg)
+![Railway](https://img.shields.io/badge/deploy-railway-purple.svg)
 ![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)
 
-AI agents for venture capital workflows, delivered as a Next.js + Vercel Functions app
-backed by Supabase. Three agents (briefing, news, outreach) built on LangChain/LangGraph
-with Claude as the primary LLM.
+AI agents for venture capital workflows, delivered as a FastAPI service on
+Railway backed by the shared NEA Scout Supabase project. Three agents
+(briefing, news, outreach) built on LangChain/LangGraph with Claude as the
+primary LLM.
 
 ---
 
