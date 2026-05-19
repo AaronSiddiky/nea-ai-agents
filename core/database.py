@@ -24,7 +24,7 @@ Usage:
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, asdict, fields
 from datetime import datetime
 from typing import Optional
 import logging
@@ -650,10 +650,13 @@ def read_competitors_from_supabase(company_id: str) -> list[CompetitorSnapshot]:
         return []
 
     out = []
+    # CompetitorSnapshot is a frozen dataclass shape; the briefing_competitors
+    # row carries extra DB-only columns (id, created_at, canonical_entity_id,
+    # etc.) that aren't on the dataclass. Filter them out before unpacking.
+    allowed = {f.name for f in fields(CompetitorSnapshot)}
     for row in (resp.data or []):
-        row.pop('id', None)
-        row.pop('created_at', None)
-        out.append(CompetitorSnapshot(**row))
+        cleaned = {k: v for k, v in row.items() if k in allowed}
+        out.append(CompetitorSnapshot(**cleaned))
     return out
 
 
