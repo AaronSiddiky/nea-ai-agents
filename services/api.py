@@ -24,7 +24,7 @@ from datetime import datetime
 from typing import Optional
 from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -101,6 +101,9 @@ NEA_API_KEY = os.getenv("NEA_API_KEY")
 _PROTECTED_METHODS = {"POST", "DELETE", "PUT", "PATCH"}
 _PROTECTED_PATH_PREFIX = "/api/"
 _UNPROTECTED_PATHS = {"/", "/health"}
+# Internal endpoints are guarded by X-NEA-Internal-Token (NEA_INTERNAL_SECRET).
+# They bypass the user-JWT requirement so cron / GitHub Actions can call them.
+_INTERNAL_PATH_PREFIX = "/api/internal/"
 
 
 @app.middleware("http")
@@ -117,6 +120,7 @@ async def require_auth(request: Request, call_next):
     if (
         request.method in _PROTECTED_METHODS
         and request.url.path.startswith(_PROTECTED_PATH_PREFIX)
+        and not request.url.path.startswith(_INTERNAL_PATH_PREFIX)
         and request.url.path not in _UNPROTECTED_PATHS
     ):
         if USE_SUPABASE_AUTH or USE_CLERK_AUTH:
@@ -1134,6 +1138,73 @@ async def submit_outreach_feedback(request: OutreachFeedbackRequest):
         approval_status=request.approval_status,
         promoted=request.approval_status in PROMOTABLE_STATUSES,
     )
+
+
+# =============================================================================
+# INTERNAL JOB TRIGGERS (GitHub Actions cron)
+# =============================================================================
+# These endpoints kick off long-running batch jobs in background threads and
+# return immediately with a job id. Caller polls /api/news/status/{id} for
+# completion. Guarded by NEA_INTERNAL_SECRET — never expose to the frontend.
+
+NEA_INTERNAL_SECRET = os.getenv("NEA_INTERNAL_SECRET")
+
+
+def _check_internal_token(request: Request) -> None:
+    """403 unless the request carries a matching X-NEA-Internal-Token header."""
+    if not NEA_INTERNAL_SECRET:
+        raise HTTPException(status_code=503, detail="Internal endpoints disabled (NEA_INTERNAL_SECRET unset)")
+    provided = request.headers.get("x-nea-internal-token", "")
+    if not hmac.compare_digest(provided, NEA_INTERNAL_SECRET):
+        raise HTTPException(status_code=403, detail="Invalid internal token")
+
+
+def _run_news_refresh_job() -> None:
+    """Background-thread wrapper around scripts/run_news_refresh.main()."""
+    try:
+        from scripts.run_news_refresh import main as run_news_main
+        run_news_main()
+    except Exception:
+        logger.exception("Background news refresh failed")
+
+
+def _run_investor_digest_job() -> None:
+    """Background-thread wrapper around scripts/run_investor_digest.main()."""
+    try:
+        from scripts.run_investor_digest import main as run_digest_main
+        run_digest_main()
+    except Exception:
+        logger.exception("Background investor digest failed")
+
+
+@app.post("/api/internal/news/refresh")
+async def internal_trigger_news_refresh(request: Request, background_tasks: BackgroundTasks):
+    """
+    Kick off scripts/run_news_refresh in the background.
+
+    Auth: X-NEA-Internal-Token header must equal NEA_INTERNAL_SECRET.
+    Returns 202 immediately. Caller can poll /api/news/status for the
+    matching job_runs row.
+    """
+    _check_internal_token(request)
+    background_tasks.add_task(_run_news_refresh_job)
+    logger.info("Internal trigger: news refresh queued")
+    return {"status": "queued", "agent_type": "news_aggregator"}
+
+
+@app.post("/api/internal/digest/run")
+async def internal_trigger_investor_digest(request: Request, background_tasks: BackgroundTasks):
+    """
+    Kick off scripts/run_investor_digest in the background.
+
+    Auth: X-NEA-Internal-Token header must equal NEA_INTERNAL_SECRET.
+    Returns 202 immediately. Caller can poll /api/news/status (agent_type
+    filter) for completion.
+    """
+    _check_internal_token(request)
+    background_tasks.add_task(_run_investor_digest_job)
+    logger.info("Internal trigger: investor digest queued")
+    return {"status": "queued", "agent_type": "investor_digest"}
 
 
 # =============================================================================
