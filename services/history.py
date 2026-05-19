@@ -487,8 +487,36 @@ class AuditLogRecord:
         )
 
 
+# ---------------------------------------------------------------------------
+# `audit_logs.actor` convention (NEA M4)
+#
+# `actor` is a single TEXT column that holds either:
+#   • a Supabase `auth.users.id` UUID, as a string  — when the action is
+#     user-attributable (e.g. investor approved an outreach draft); or
+#   • a stable lower-snake agent name from `AGENT_ACTORS` below — when the
+#     action is a batch / scheduled / agent-only run with no caller (e.g. the
+#     6-hourly news refresh cron).
+#
+# The NEA admin telemetry UI (`/admin/telemetry`) regexes `actor` against the
+# UUID format; matches join `scout_user_directory` for a display name, misses
+# render verbatim. Keep new agent names in `AGENT_ACTORS` so reviewers can
+# audit what's allowed.
+# ---------------------------------------------------------------------------
+
+AGENT_ACTORS: set[str] = {
+    "news_agent",
+    "outreach_agent",
+    "briefing_agent",
+    "digest_agent",
+}
+
+
 class AuditLogDB:
-    """Supabase database for persistent audit logs."""
+    """Supabase database for persistent audit logs.
+
+    Prefer the `log_user_action` / `log_agent_action` helpers below over
+    calling `log` directly — they enforce the M4 actor convention.
+    """
 
     def log(
         self,
@@ -501,7 +529,13 @@ class AuditLogDB:
         details: Optional[dict] = None,
         request_id: Optional[str] = None,
     ) -> str:
-        """Log an audit event. Returns the record ID."""
+        """Log an audit event. Returns the record ID.
+
+        `actor` SHOULD follow the convention documented at module scope
+        (UUID string for user-driven actions, lower-snake agent name from
+        `AGENT_ACTORS` for batch/cron actions). Pass `None` only when neither
+        applies.
+        """
         supabase = get_supabase()
         data = {
             "agent": agent,
@@ -518,6 +552,68 @@ class AuditLogDB:
         record_id = result.data[0]['id']
         logger.debug(f"Audit log: {agent}/{event_type}/{action}")
         return record_id
+
+    def log_user_action(
+        self,
+        user_id: str,
+        agent: str,
+        event_type: str,
+        action: str,
+        resource_type: Optional[str] = None,
+        resource_id: Optional[str] = None,
+        details: Optional[dict] = None,
+        request_id: Optional[str] = None,
+    ) -> str:
+        """Log an action attributed to a specific Supabase user.
+
+        `user_id` is written verbatim into `actor` so the admin telemetry can
+        join `actor::uuid = auth.users.id`. Use this for investor-initiated
+        events (approve / edit / reject draft, kick off an ad-hoc briefing).
+        """
+        return self.log(
+            agent=agent,
+            event_type=event_type,
+            action=action,
+            resource_type=resource_type,
+            resource_id=resource_id,
+            actor=user_id,
+            details=details,
+            request_id=request_id,
+        )
+
+    def log_agent_action(
+        self,
+        agent_name: str,
+        event_type: str,
+        action: str,
+        resource_type: Optional[str] = None,
+        resource_id: Optional[str] = None,
+        details: Optional[dict] = None,
+        request_id: Optional[str] = None,
+    ) -> str:
+        """Log an action run by a batch / scheduled agent with no user caller.
+
+        `agent_name` MUST be one of `AGENT_ACTORS`. Both `agent` (the source
+        column — e.g. 'meeting_briefing_pipeline') and `actor` are populated
+        from `agent_name` so the same value appears in the admin agent
+        breakdown and the actor column.
+        """
+        if agent_name not in AGENT_ACTORS:
+            raise ValueError(
+                f"Unknown agent name {agent_name!r} — add it to AGENT_ACTORS "
+                f"in services/history.py if this is a real new actor. "
+                f"Known: {sorted(AGENT_ACTORS)}"
+            )
+        return self.log(
+            agent=agent_name,
+            event_type=event_type,
+            action=action,
+            resource_type=resource_type,
+            resource_id=resource_id,
+            actor=agent_name,
+            details=details,
+            request_id=request_id,
+        )
 
     def list_logs(
         self,
