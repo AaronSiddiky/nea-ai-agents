@@ -192,6 +192,8 @@ def sync_founders_to_supabase(
     synced = 0
     errors = []
 
+    from core.canonical_bridge import resolve_canonical_entity_id
+
     for founder in founders:
         try:
             data = {
@@ -204,6 +206,9 @@ def sync_founders_to_supabase(
                 'source': founder.source,
                 'observed_at': founder.observed_at,
             }
+            cid = resolve_canonical_entity_id(domain=founder.company_id, name=company_name)
+            if cid:
+                data['canonical_entity_id'] = cid
 
             # Upsert (insert or update on conflict)
             supabase.table('founders').upsert(
@@ -240,6 +245,8 @@ def sync_company_to_supabase(company: CompanyCore) -> dict:
         return {'synced': False, 'error': str(e)}
 
     try:
+        from core.canonical_bridge import resolve_canonical_entity_id
+
         data = {
             'company_id': company.company_id,
             'company_name': company.company_name,
@@ -259,6 +266,9 @@ def sync_company_to_supabase(company: CompanyCore) -> dict:
             'observed_at': company.observed_at,
             'source_map': company.source_map,
         }
+        cid = resolve_canonical_entity_id(domain=company.company_id, name=company.company_name)
+        if cid:
+            data['canonical_entity_id'] = cid
 
         # Upsert (insert or update on conflict)
         supabase.table('briefing_companies').upsert(
@@ -298,6 +308,9 @@ def sync_news_to_supabase(news: list[NewsArticle], company_id: str) -> dict:
     synced = 0
     errors = []
 
+    from core.canonical_bridge import resolve_canonical_entity_id
+    cid = resolve_canonical_entity_id(domain=company_id)
+
     for article in news:
         try:
             data = {
@@ -313,6 +326,8 @@ def sync_news_to_supabase(news: list[NewsArticle], company_id: str) -> dict:
                 'observed_at': article.observed_at,
                 'source': article.source,
             }
+            if cid:
+                data['canonical_entity_id'] = cid
 
             # Upsert (insert or update on conflict)
             supabase.table('briefing_news').upsert(
@@ -354,6 +369,8 @@ def sync_competitors_to_supabase(competitors: list[CompetitorSnapshot]) -> dict:
     synced = 0
     errors = []
 
+    from core.canonical_bridge import resolve_canonical_entity_id
+
     for c in competitors:
         try:
             data = {
@@ -371,6 +388,9 @@ def sync_competitors_to_supabase(competitors: list[CompetitorSnapshot]) -> dict:
                 'harmonic_id': c.harmonic_id,
                 'observed_at': c.observed_at,
             }
+            cid = resolve_canonical_entity_id(domain=c.company_id, name=c.competitor_name)
+            if cid:
+                data['canonical_entity_id'] = cid
 
             supabase.table('briefing_competitors').upsert(
                 data,
@@ -408,6 +428,8 @@ def sync_signals_to_supabase(signals: list[KeySignal]) -> dict:
     synced = 0
     errors = []
 
+    from core.canonical_bridge import resolve_canonical_entity_id
+
     for signal in signals:
         try:
             data = {
@@ -417,6 +439,9 @@ def sync_signals_to_supabase(signals: list[KeySignal]) -> dict:
                 'source': signal.source,
                 'observed_at': signal.observed_at,
             }
+            cid = resolve_canonical_entity_id(domain=signal.company_id)
+            if cid:
+                data['canonical_entity_id'] = cid
             supabase.table('briefing_signals').upsert(
                 data,
                 on_conflict='company_id,signal_type,description'

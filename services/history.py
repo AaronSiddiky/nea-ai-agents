@@ -108,6 +108,15 @@ class BriefingHistoryDB:
         if effective_user_id:
             data["user_id"] = effective_user_id
 
+        # M1b: bridge to canonical_entities
+        try:
+            from core.canonical_bridge import resolve_canonical_entity_id
+            cid = resolve_canonical_entity_id(domain=record.company_id, name=record.company_name)
+            if cid:
+                data["canonical_entity_id"] = cid
+        except Exception as _ex:  # never block a briefing write
+            logger.debug(f"canonical_bridge lookup failed (briefing_history): {_ex}")
+
         supabase.table("briefing_history").insert(data).execute()
         logger.info(f"Saved briefing for {record.company_name}" +
                    (f" (user: {effective_user_id})" if effective_user_id else ""))
@@ -375,6 +384,15 @@ class OutreachHistoryDB:
             "error": error,
             "user_id": user_id,
         }
+
+        # M1b: bridge to canonical_entities
+        try:
+            from core.canonical_bridge import resolve_canonical_entity_id
+            cid = resolve_canonical_entity_id(domain=company_id, name=company_name)
+            if cid:
+                data["canonical_entity_id"] = cid
+        except Exception as _ex:
+            logger.debug(f"canonical_bridge lookup failed (outreach_history): {_ex}")
 
         result = supabase.table("outreach_history").insert(data).execute()
         record_id = result.data[0]['id']

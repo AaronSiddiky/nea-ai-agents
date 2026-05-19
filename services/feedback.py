@@ -73,6 +73,15 @@ def save_feedback(record: FeedbackRecord) -> str:
         "investor_notes":   record.investor_notes,
     }
 
+    # M1b: bridge to canonical_entities
+    try:
+        from core.canonical_bridge import resolve_canonical_entity_id
+        cid = resolve_canonical_entity_id(domain=record.company_id)
+        if cid:
+            data["canonical_entity_id"] = cid
+    except Exception as _ex:
+        logger.debug(f"canonical_bridge lookup failed (outreach_feedback): {_ex}")
+
     result = supabase.table("outreach_feedback").insert(data).execute()
     record_id = result.data[0]["id"] if result.data else "unknown"
 

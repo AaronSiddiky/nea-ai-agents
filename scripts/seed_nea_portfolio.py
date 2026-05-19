@@ -360,6 +360,16 @@ def seed(dry_run: bool = False):
     from core.clients import get_supabase
     supabase = get_supabase()
 
+    # M1b: enrich each record with canonical_entity_id (best-effort)
+    try:
+        from core.canonical_bridge import resolve_canonical_entity_id
+        for r in records:
+            cid = resolve_canonical_entity_id(domain=r.get("domain"), name=r.get("company_name"))
+            if cid:
+                r["canonical_entity_id"] = cid
+    except Exception as _ex:
+        print(f"  WARN canonical_bridge unavailable, seeding without canonical_entity_id: {_ex}")
+
     # Upsert in batches of 50
     batch_size = 50
     total_upserted = 0

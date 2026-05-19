@@ -826,13 +826,22 @@ async def add_company(request: CompanyAddRequest):
                 detail=f"Company '{request.domain}' already exists"
             )
 
-        # Insert the company
-        result = supabase.table("watched_companies").insert({
+        # Insert the company. M1b: bridge to canonical_entities.
+        _watched_row = {
             "company_id": request.domain,
             "company_name": request.name,
             "category": request.category,
             "is_active": True,
-        }).execute()
+        }
+        try:
+            from core.canonical_bridge import resolve_canonical_entity_id
+            _cid = resolve_canonical_entity_id(domain=request.domain, name=request.name)
+            if _cid:
+                _watched_row["canonical_entity_id"] = _cid
+        except Exception as _ex:
+            logger.debug(f"canonical_bridge lookup failed (watched_companies add): {_ex}")
+
+        result = supabase.table("watched_companies").insert(_watched_row).execute()
 
         if not result.data:
             raise HTTPException(status_code=500, detail="Failed to insert company")

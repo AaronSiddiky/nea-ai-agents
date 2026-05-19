@@ -282,6 +282,14 @@ def add_company(
         "industry_tags": industry_tags or [],
         "is_active": True,
     }
+    # M1b: bridge to canonical_entities
+    try:
+        from core.canonical_bridge import resolve_canonical_entity_id
+        cid = resolve_canonical_entity_id(domain=company_id, harmonic_id=harmonic_id, name=company_name)
+        if cid:
+            data["canonical_entity_id"] = cid
+    except Exception as _ex:
+        pass
 
     result = supabase.table("watched_companies").insert(data).execute()
     return _row_to_company(result.data[0])
@@ -794,9 +802,7 @@ class CachedStory:
         )
 
 
-def save_story(story: CachedStory) -> bool:
-    """Save or update a cached story."""
-    supabase = get_supabase()
+def _story_to_row(story: CachedStory) -> dict:
     data = {
         "story_id": story.story_id,
         "primary_url": story.primary_url,
@@ -820,6 +826,25 @@ def save_story(story: CachedStory) -> bool:
         "article_signal_ids": story.article_signal_ids,
         "digest_generated_at": story.digest_generated_at,
     }
+    # M1b: bridge to canonical_entities (only if a company is attached)
+    if story.company_id:
+        try:
+            from core.canonical_bridge import resolve_canonical_entity_id
+            cid = resolve_canonical_entity_id(
+                domain=story.company_id,
+                name=story.company_name,
+            )
+            if cid:
+                data["canonical_entity_id"] = cid
+        except Exception:
+            pass
+    return data
+
+
+def save_story(story: CachedStory) -> bool:
+    """Save or update a cached story."""
+    supabase = get_supabase()
+    data = _story_to_row(story)
 
     # Upsert based on story_id
     supabase.table("stories").upsert(data, on_conflict="story_id").execute()
@@ -833,29 +858,7 @@ def save_stories_batch(stories: List[CachedStory], digest_generated_at: str) -> 
 
     for story in stories:
         story.digest_generated_at = digest_generated_at
-        data = {
-            "story_id": story.story_id,
-            "primary_url": story.primary_url,
-            "primary_title": story.primary_title,
-            "other_urls": story.other_urls,
-            "classification": story.classification,
-            "sentiment_label": story.sentiment_label,
-            "sentiment_score": story.sentiment_score,
-            "sentiment_keywords": story.sentiment_keywords,
-            "synopsis": story.synopsis,
-            "company_id": story.company_id,
-            "company_name": story.company_name,
-            "company_category": story.company_category,
-            "parent_company_name": story.parent_company_name,
-            "industry_tags": story.industry_tags,
-            "priority_score": story.priority_score,
-            "priority_reasons": story.priority_reasons,
-            "published_date": story.published_date,
-            "max_engagement": story.max_engagement,
-            "source_count": story.source_count,
-            "article_signal_ids": story.article_signal_ids,
-            "digest_generated_at": story.digest_generated_at,
-        }
+        data = _story_to_row(story)
         supabase.table("stories").upsert(data, on_conflict="story_id").execute()
         saved_count += 1
 
