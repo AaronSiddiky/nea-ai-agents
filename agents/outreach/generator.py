@@ -48,7 +48,7 @@ from tools.company_tools import get_company_bundle, normalize_company_id, ingest
 
 from .context import get_investor_context, load_samples
 from .context_types import detect_context_type, CONTEXT_TYPE_CONFIGS, ContextType
-from .prompts import build_generation_prompt
+from .prompts import build_generation_prompt, build_cleanup_prompt
 
 logger = get_logger(__name__)
 
@@ -58,6 +58,165 @@ logger = get_logger(__name__)
 
 DEFAULT_LLM_MODEL = "claude-sonnet-4-5-20250929"
 DEFAULT_INVESTOR_KEY = "ashley"
+
+# Fallback cleanup model if the "outreach_cleanup" config is missing from the
+# prompt registry (e.g., older deployments). Haiku 4.5 is the production pick.
+DEFAULT_CLEANUP_MODEL = "claude-haiku-4-5-20251001"
+DEFAULT_CLEANUP_TEMPERATURE = 0.1
+
+
+# =============================================================================
+# CLEANUP PASS (call 2 of 2 — de-LLM register scrub)
+# =============================================================================
+
+def _run_cleanup_pass(
+    draft_text: str,
+    investor_profile,
+    output_format: str,
+    company_id: str,
+    parent_operation: str = "outreach",
+) -> dict:
+    """
+    Run the cleanup LLM call on a draft message.
+
+    The cleanup pass uses a smaller, cheaper model (Haiku) at low temperature
+    to scrub surface-level AI tells (em dashes, banned intensifiers, etc.)
+    without touching personalization, structure, or facts.
+
+    On failure, this function returns the original draft and ``success=False``
+    so the caller can fall back gracefully — cleanup is a quality improvement,
+    not a correctness gate.
+
+    Args:
+        draft_text: Raw draft message from call 1 (includes "Subject:" line
+            for emails).
+        investor_profile: The investor's profile dataclass.
+        output_format: "email" or "linkedin".
+        company_id: Normalized company identifier (for logging/tracing).
+        parent_operation: Operation name of the parent draft call, used to
+            tag the cleanup log event ("outreach" or "outreach_stealth").
+
+    Returns:
+        Dict with:
+            cleaned_text: str — cleaned message, or the draft on failure
+            success: bool — True if cleanup ran cleanly
+            error: Optional[str]
+            model: str
+            tokens_in: int
+            tokens_out: int
+            latency_ms: int
+    """
+    result = {
+        "cleaned_text": draft_text,
+        "success": False,
+        "error": None,
+        "model": None,
+        "tokens_in": 0,
+        "tokens_out": 0,
+        "latency_ms": 0,
+    }
+
+    try:
+        try:
+            cleanup_config = get_model_config("outreach_cleanup")
+            cleanup_model = cleanup_config.model
+            cleanup_temperature = cleanup_config.temperature
+        except KeyError:
+            logger.warning(
+                "outreach_cleanup model config not registered, "
+                f"falling back to {DEFAULT_CLEANUP_MODEL}"
+            )
+            cleanup_model = DEFAULT_CLEANUP_MODEL
+            cleanup_temperature = DEFAULT_CLEANUP_TEMPERATURE
+
+        result["model"] = cleanup_model
+
+        cleanup_messages = build_cleanup_prompt(
+            draft_text=draft_text,
+            investor_profile=investor_profile,
+            output_format=output_format,
+        )
+
+        is_anthropic = cleanup_model.startswith("claude")
+        if is_anthropic:
+            llm = ChatAnthropic(model=cleanup_model, temperature=cleanup_temperature)
+        else:
+            llm = ChatOpenAI(model=cleanup_model, temperature=cleanup_temperature)
+
+        start_time = time.time()
+        response = llm.invoke(cleanup_messages)
+        latency_ms = int((time.time() - start_time) * 1000)
+
+        cleaned = (response.content or "").strip()
+        if not cleaned:
+            raise ValueError("Cleanup pass returned empty content")
+
+        tokens_in = (
+            response.usage_metadata.get("input_tokens", 0)
+            if hasattr(response, "usage_metadata") and response.usage_metadata
+            else 0
+        )
+        tokens_out = (
+            response.usage_metadata.get("output_tokens", 0)
+            if hasattr(response, "usage_metadata") and response.usage_metadata
+            else 0
+        )
+
+        result["cleaned_text"] = cleaned
+        result["success"] = True
+        result["tokens_in"] = tokens_in
+        result["tokens_out"] = tokens_out
+        result["latency_ms"] = latency_ms
+
+        # Log this as a separate LLM interaction so it shows up in tracing
+        # alongside the draft call.
+        try:
+            log_llm_interaction(
+                operation=f"{parent_operation}_cleanup",
+                model=cleanup_model,
+                system_prompt=cleanup_messages[0].content,
+                user_prompt=cleanup_messages[1].content,
+                response=cleaned,
+                tokens_in=tokens_in,
+                tokens_out=tokens_out,
+                latency_ms=latency_ms,
+                success=True,
+                temperature=cleanup_temperature,
+                company_id=company_id,
+            )
+        except Exception as log_err:
+            logger.debug(f"Cleanup pass logging failed: {log_err}")
+
+        try:
+            tracker = get_tracker()
+            tracker.log_api_call(
+                service="anthropic" if is_anthropic else "openai",
+                endpoint=(
+                    f"/messages ({cleanup_model})"
+                    if is_anthropic
+                    else f"/chat/completions ({cleanup_model})"
+                ),
+                method="POST",
+                status_code=200,
+                tokens_in=tokens_in,
+                tokens_out=tokens_out,
+                latency_ms=latency_ms,
+                metadata={
+                    "company_id": company_id,
+                    "operation": f"{parent_operation}_cleanup",
+                    "output_format": output_format,
+                },
+            )
+        except Exception as track_err:
+            logger.debug(f"Cleanup pass tracker.log_api_call failed: {track_err}")
+
+    except Exception as e:
+        result["error"] = f"Cleanup pass failed: {e}"
+        logger.warning(
+            f"Cleanup pass failed for {company_id}, falling back to draft: {e}"
+        )
+
+    return result
 
 
 # =============================================================================
@@ -412,18 +571,7 @@ def _generate_stealth_outreach(
         tokens_in = response.usage_metadata.get("input_tokens", 0) if hasattr(response, "usage_metadata") and response.usage_metadata else 0
         tokens_out = response.usage_metadata.get("output_tokens", 0) if hasattr(response, "usage_metadata") and response.usage_metadata else 0
 
-        # Step 8: Parse output
-        message_text = raw_content.strip()
-        subject = None
-        if output_format == "email" and message_text.lower().startswith("subject:"):
-            lines = message_text.split("\n", 1)
-            subject = lines[0].replace("Subject:", "").replace("subject:", "").strip()
-            message_text = lines[1].strip() if len(lines) > 1 else message_text
-
-        result["message"] = message_text
-        result["subject"] = subject
-        result["success"] = True
-
+        # Log the draft call before running cleanup.
         log_llm_interaction(
             operation="outreach_stealth",
             model=actual_model,
@@ -438,6 +586,38 @@ def _generate_stealth_outreach(
             company_id=founder_linkedin_url,
         )
 
+        # Step 7b: Cleanup pass (call 2 of 2) — scrubs AI tells from the draft.
+        # Falls back to the raw draft if cleanup fails, so a flaky Haiku call
+        # never blocks the user from getting a message.
+        cleanup_result = _run_cleanup_pass(
+            draft_text=raw_content,
+            investor_profile=investor_profile,
+            output_format=output_format,
+            company_id=founder_linkedin_url,
+            parent_operation="outreach_stealth",
+        )
+        final_content = cleanup_result["cleaned_text"]
+        cleanup_succeeded = cleanup_result["success"]
+        total_tokens = (
+            tokens_in + tokens_out
+            + cleanup_result["tokens_in"] + cleanup_result["tokens_out"]
+        )
+        total_latency_ms = latency_ms + cleanup_result["latency_ms"]
+
+        # Step 8: Parse output (using cleaned content if available).
+        message_text = final_content.strip()
+        subject = None
+        if output_format == "email" and message_text.lower().startswith("subject:"):
+            lines = message_text.split("\n", 1)
+            subject = lines[0].replace("Subject:", "").replace("subject:", "").strip()
+            message_text = lines[1].strip() if len(lines) > 1 else message_text
+
+        result["message"] = message_text
+        result["subject"] = subject
+        result["draft_message"] = raw_content
+        result["cleanup_succeeded"] = cleanup_succeeded
+        result["success"] = True
+
         log_audit_event(
             event_type="outreach",
             action="create",
@@ -450,15 +630,18 @@ def _generate_stealth_outreach(
                 "context_type": ctx_type.value,
                 "output_format": output_format,
                 "model": actual_model,
+                "cleanup_model": cleanup_result["model"],
+                "cleanup_succeeded": cleanup_succeeded,
                 "swarm_enriched": swarm_succeeded,
-                "tokens_total": tokens_in + tokens_out,
-                "latency_ms": latency_ms,
+                "tokens_total": total_tokens,
+                "latency_ms": total_latency_ms,
             },
         )
 
         logger.info(
             f"Generated stealth outreach for {resolved_name} "
-            f"(investor: {investor_key}, swarm_enriched: {swarm_succeeded})"
+            f"(investor: {investor_key}, swarm_enriched: {swarm_succeeded}, "
+            f"cleanup_succeeded: {cleanup_succeeded})"
         )
 
     except Exception as e:
@@ -498,8 +681,11 @@ def generate_outreach(
     1. Normalize company ID and ingest data
     2. Load investor profile and detect context type
     3. Select style examples matching investor + context type
-    4. Build prompts via build_generation_prompt()
-    5. Call LLM and parse result
+    4. Build draft prompt via build_draft_prompt() (alias: build_generation_prompt)
+    5. Call DRAFT LLM (Sonnet, temp 0.3) — focuses on voice + personalization
+    6. Run CLEANUP LLM (Haiku, temp 0.1) to scrub AI tells from the draft
+       (falls back to draft on cleanup failure)
+    7. Parse final message and persist draft + final to history
 
     Args:
         company_id: Company URL or domain
@@ -717,8 +903,27 @@ def generate_outreach(
         call_metadata.tokens_out = tokens_out
         call_metadata.latency_ms = latency_ms
 
-        # Step 11: Parse output
-        message_text = raw_content.strip()
+        # Step 10b: Cleanup pass (call 2 of 2) — scrubs surface-level AI tells
+        # from the draft without changing personalization or structure. Falls
+        # back to the raw draft if the Haiku call fails, so cleanup is never
+        # a correctness gate.
+        cleanup_result = _run_cleanup_pass(
+            draft_text=raw_content,
+            investor_profile=investor_profile,
+            output_format=output_format,
+            company_id=normalized_id,
+            parent_operation="outreach",
+        )
+        final_content = cleanup_result["cleaned_text"]
+        cleanup_succeeded = cleanup_result["success"]
+        cleanup_tokens_in = cleanup_result["tokens_in"]
+        cleanup_tokens_out = cleanup_result["tokens_out"]
+        cleanup_latency_ms = cleanup_result["latency_ms"]
+        total_tokens = tokens_in + tokens_out + cleanup_tokens_in + cleanup_tokens_out
+        total_latency_ms = latency_ms + cleanup_latency_ms
+
+        # Step 11: Parse output (using cleaned content if cleanup succeeded).
+        message_text = final_content.strip()
         subject = None
 
         if output_format == "email" and message_text.lower().startswith("subject:"):
@@ -728,9 +933,11 @@ def generate_outreach(
 
         result["message"] = message_text
         result["subject"] = subject
+        result["draft_message"] = raw_content
+        result["cleanup_succeeded"] = cleanup_succeeded
         result["success"] = True
 
-        # Step 12: Log everything
+        # Step 12: Log everything (the draft call; cleanup logs itself).
         tracker.log_api_call(
             service="anthropic" if is_anthropic else "openai",
             endpoint=f"/messages ({actual_model})" if is_anthropic else f"/chat/completions ({actual_model})",
@@ -747,6 +954,7 @@ def generate_outreach(
                 "output_format": output_format,
                 "investor_key": investor_key,
                 "context_type": ctx_type.value,
+                "stage": "draft",
             },
         )
 
@@ -768,17 +976,25 @@ def generate_outreach(
             success=True,
         )
 
+        # Usage metric: report combined totals across draft + cleanup so
+        # downstream cost dashboards see the true per-outreach spend.
         tracker.log_usage(
             company_id=normalized_id,
             action="outreach",
             metadata={
                 "model": actual_model,
+                "cleanup_model": cleanup_result["model"],
+                "cleanup_succeeded": cleanup_succeeded,
                 "output_format": output_format,
                 "investor_key": investor_key,
                 "context_type": ctx_type.value,
                 "contact_name": result["contact_name"],
-                "tokens_in": tokens_in,
-                "tokens_out": tokens_out,
+                "tokens_in": tokens_in + cleanup_tokens_in,
+                "tokens_out": tokens_out + cleanup_tokens_out,
+                "draft_tokens_in": tokens_in,
+                "draft_tokens_out": tokens_out,
+                "cleanup_tokens_in": cleanup_tokens_in,
+                "cleanup_tokens_out": cleanup_tokens_out,
             },
         )
 
@@ -809,15 +1025,17 @@ def generate_outreach(
                 "context_type": ctx_type.value,
                 "output_format": output_format,
                 "model": actual_model,
-                "tokens_total": tokens_in + tokens_out,
-                "latency_ms": latency_ms,
+                "cleanup_model": cleanup_result["model"],
+                "cleanup_succeeded": cleanup_succeeded,
+                "tokens_total": total_tokens,
+                "latency_ms": total_latency_ms,
             },
         )
 
-        # Save to persistent history
+        # Save to persistent history (final + draft + cleanup status).
         try:
             outreach_history = get_outreach_history()
-            message_content = result.get("email") or result.get("linkedin") or ""
+            message_content = message_text or ""
             outreach_history.save_outreach(
                 company_id=normalized_id,
                 company_name=bundle.company_core.company_name,
@@ -828,10 +1046,12 @@ def generate_outreach(
                 message_preview=message_content[:500] if message_content else None,
                 full_message=message_content,
                 model=actual_model,
-                tokens_total=tokens_in + tokens_out,
-                latency_ms=latency_ms,
+                tokens_total=total_tokens,
+                latency_ms=total_latency_ms,
                 success=True,
                 user_id=user_id,
+                draft_message=raw_content,
+                cleanup_succeeded=cleanup_succeeded,
             )
 
             # Also save to persistent audit log
@@ -848,7 +1068,9 @@ def generate_outreach(
                     "investor_key": investor_key,
                     "context_type": ctx_type.value,
                     "output_format": output_format,
-                    "tokens_total": tokens_in + tokens_out,
+                    "cleanup_model": cleanup_result["model"],
+                    "cleanup_succeeded": cleanup_succeeded,
+                    "tokens_total": total_tokens,
                 },
             )
         except Exception as hist_err:

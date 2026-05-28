@@ -348,6 +348,8 @@ class OutreachHistoryDB:
         success: bool = True,
         error: Optional[str] = None,
         user_id: Optional[str] = None,
+        draft_message: Optional[str] = None,
+        cleanup_succeeded: Optional[bool] = None,
     ) -> str:
         """Save an outreach message to history. Returns the record ID.
 
@@ -359,13 +361,19 @@ class OutreachHistoryDB:
             context_type: Context type used for generation
             output_format: 'email' or 'linkedin'
             message_preview: First 500 chars of message
-            full_message: Complete message content
+            full_message: Complete message content (post-cleanup)
             model: LLM model used
-            tokens_total: Total token count
-            latency_ms: Generation latency
+            tokens_total: Total token count (draft + cleanup combined)
+            latency_ms: Generation latency (draft + cleanup combined)
             success: Whether generation succeeded
             error: Error message if failed
             user_id: Optional Clerk user ID (Phase 3.1)
+            draft_message: Pre-cleanup draft text (call 1 output). Useful for
+                debugging and eval comparison. Optional — columns may not yet
+                exist in older deployments.
+            cleanup_succeeded: True if the cleanup pass ran cleanly, False if
+                it failed and we fell back to the draft, None if cleanup is
+                disabled entirely. Optional column.
         """
         supabase = get_supabase()
         data = {
@@ -384,6 +392,10 @@ class OutreachHistoryDB:
             "error": error,
             "user_id": user_id,
         }
+        if draft_message is not None:
+            data["draft_message"] = draft_message
+        if cleanup_succeeded is not None:
+            data["cleanup_succeeded"] = cleanup_succeeded
 
         # M1b: bridge to canonical_entities
         try:
