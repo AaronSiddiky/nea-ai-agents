@@ -1044,6 +1044,7 @@ async def generate_outreach_endpoint(request: Request, body: OutreachRequest):
                 contact_name=body.contact_name,
                 investor_key=body.investor_key,
                 skip_ingest=body.skip_ingest,
+                force_refresh=body.force_refresh,
                 context_type_override=body.context_type_override,
                 outreach_goal=body.outreach_goal,
                 has_event_context=body.has_event_context,

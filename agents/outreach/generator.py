@@ -46,7 +46,7 @@ from core.observability import (
 from services.history import get_outreach_history, get_audit_log
 from tools.company_tools import get_company_bundle, normalize_company_id, ingest_company
 
-from .context import get_investor_context, load_samples
+from .context import get_investor_context, load_combined_samples
 from .context_types import detect_context_type, CONTEXT_TYPE_CONFIGS, ContextType
 from .prompts import build_generation_prompt, build_cleanup_prompt
 
@@ -521,15 +521,10 @@ def _generate_stealth_outreach(
         ctx_type = ContextType.STEALTH_FOUNDER_OUTREACH
         ctx_config = CONTEXT_TYPE_CONFIGS[ctx_type]
 
-        static_examples = load_samples(investor_key=investor_key, context_type=ctx_type.value)
-        try:
-            from services.feedback import load_promoted_samples
-            promoted = load_promoted_samples(investor_key)
-            promoted_matching = [s for s in promoted if s.context_type == ctx_type.value]
-            combined = promoted_matching + static_examples
-            style_examples = combined
-        except Exception:
-            style_examples = static_examples
+        style_examples = load_combined_samples(
+            investor_key=investor_key,
+            context_type=ctx_type.value,
+        )
 
         # Step 6: Build prompts
         messages = build_generation_prompt(
@@ -663,6 +658,7 @@ def generate_outreach(
     investor_key: str = DEFAULT_INVESTOR_KEY,
     model: str = DEFAULT_LLM_MODEL,
     skip_ingest: bool = False,
+    force_refresh: bool = False,
     context_type_override: Optional[str] = None,
     outreach_goal: Optional[str] = None,
     has_event_context: bool = False,
@@ -742,7 +738,7 @@ def generate_outreach(
         # Step 1: Ingest company data
         if not skip_ingest:
             logger.info(f"Ingesting data for {normalized_id}...")
-            ingest_company(normalized_id)
+            ingest_company(normalized_id, user=user_id, force_refresh=force_refresh)
 
         # Step 2: Get company bundle
         bundle = get_company_bundle(company_id)
@@ -800,24 +796,11 @@ def generate_outreach(
         result["context_type"] = ctx_type.value
         ctx_config = CONTEXT_TYPE_CONFIGS[ctx_type]
 
-        # Step 6: Load style examples (static file + DB-promoted)
-        static_examples = load_samples(
+        # Step 6: Load style examples (promoted-first, static fallback)
+        style_examples = load_combined_samples(
             investor_key=investor_key,
             context_type=ctx_type.value,
         )
-
-        try:
-            from services.feedback import load_promoted_samples
-            promoted = load_promoted_samples(investor_key)
-            # Context-matching promoted examples take priority
-            promoted_matching = [s for s in promoted if s.context_type == ctx_type.value]
-            promoted_other = [s for s in promoted if s.context_type != ctx_type.value]
-            # Merge: matching promoted → other promoted → static
-            combined = promoted_matching + promoted_other + static_examples
-            style_examples = combined
-        except Exception as _promo_err:
-            logger.warning(f"Could not load promoted samples, using static only: {_promo_err}")
-            style_examples = static_examples
 
         # Step 7: Format and sanitize data
         safe_company_name = sanitize_company_name(bundle.company_core.company_name)

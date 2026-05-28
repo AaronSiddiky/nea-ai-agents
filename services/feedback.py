@@ -112,7 +112,11 @@ def load_promoted_samples(investor_key: str) -> list:
         Returns [] on any DB error so generation is never blocked.
     """
     # Lazy import to avoid circular dependency
-    from agents.outreach.context import EmailSample
+    from agents.outreach.context import (
+        EmailSample,
+        SAMPLE_SOURCE_PROMOTED_APPROVED,
+        SAMPLE_SOURCE_PROMOTED_EDITED,
+    )
 
     supabase = get_supabase()
 
@@ -136,6 +140,7 @@ def load_promoted_samples(investor_key: str) -> list:
         if not body:
             continue
 
+        is_edited = row.get("approval_status") == "edited"
         samples.append(EmailSample(
             investor=investor_key,
             recipient="",
@@ -143,7 +148,8 @@ def load_promoted_samples(investor_key: str) -> list:
             context_type=row.get("context_type") or "unknown",
             length=_classify_length(body),
             body=body,
-            human_edited=row.get("approval_status") == "edited",
+            human_edited=is_edited,
+            source=SAMPLE_SOURCE_PROMOTED_EDITED if is_edited else SAMPLE_SOURCE_PROMOTED_APPROVED,
         ))
 
     logger.debug(
