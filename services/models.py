@@ -275,6 +275,7 @@ class OutreachRequest(BaseModel):
     contact_name: Optional[str] = Field(default=None, description="Target contact name (auto-selected if omitted)")
     investor_key: str = Field(default="ashley", description="Investor profile key: ashley | tiffany | danielle | madison")
     skip_ingest: bool = Field(default=False, description="Use cached DB data only; set True to skip slow live ingest")
+    force_refresh: bool = Field(default=False, description="Bypass the briefing_companies TTL and re-fetch all external data")
     context_type_override: Optional[str] = Field(default=None, description="Force a specific context type (optional)")
     outreach_goal: Optional[str] = Field(default=None, description="Free-text goal, e.g. 'congratulate on Series B'")
     has_event_context: bool = Field(default=False, description="True if investor has recent event/conference context")

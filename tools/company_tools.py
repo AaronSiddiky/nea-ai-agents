@@ -33,8 +33,10 @@ Usage:
 
 from __future__ import annotations
 
+import asyncio
 import logging
-from datetime import datetime
+import os
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from core.database import (
@@ -1438,27 +1440,98 @@ def get_competitors(company_id: str, max_per_type: int = 3) -> list[CompetitorSn
 # TOOL 5: ingest_company
 # =============================================================================
 
-def ingest_company(
+# How long a briefing_companies row stays "fresh" before re-ingesting.
+# Override with the INGEST_TTL_HOURS env var.
+_DEFAULT_INGEST_TTL_HOURS = 24
+
+
+def _ingest_ttl_hours() -> int:
+    raw = os.environ.get("INGEST_TTL_HOURS")
+    if not raw:
+        return _DEFAULT_INGEST_TTL_HOURS
+    try:
+        return int(raw)
+    except ValueError:
+        logger.warning(
+            f"Invalid INGEST_TTL_HOURS={raw!r}, falling back to {_DEFAULT_INGEST_TTL_HOURS}"
+        )
+        return _DEFAULT_INGEST_TTL_HOURS
+
+
+def _briefing_freshness(normalized_id: str) -> Optional[datetime]:
+    """Return observed_at for the briefing_companies row, or None on miss/error."""
+    try:
+        from core.clients.supabase_client import get_supabase
+        supabase = get_supabase()
+        result = (
+            supabase.table("briefing_companies")
+            .select("observed_at")
+            .eq("company_id", normalized_id)
+            .order("observed_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        if not result.data:
+            return None
+        raw = result.data[0].get("observed_at")
+        if not raw:
+            return None
+        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except Exception as e:
+        logger.warning(f"TTL freshness check failed for {normalized_id}: {e}")
+        return None
+
+
+def _cached_ingest_result(normalized_id: str, observed_at: datetime) -> dict:
+    """Build the same shape as a full ingest from already-cached Supabase data."""
+    try:
+        bundle = get_company_bundle_from_supabase(normalized_id)
+    except Exception as e:
+        logger.warning(f"get_company_bundle_from_supabase failed for {normalized_id}: {e}")
+        bundle = None
+
+    company_core = bundle.company_core if bundle else None
+    return {
+        "company_id": normalized_id,
+        "company_name": company_core.company_name if company_core else None,
+        "company_core": company_core is not None,
+        "founders_count": len(bundle.founders) if bundle else 0,
+        "founders_enriched": 0,
+        "signals_count": len(bundle.key_signals) if bundle else 0,
+        "news_count": len(bundle.news) if bundle else 0,
+        "competitors_count": 0,
+        "errors": [],
+        "cached": True,
+        "observed_at": observed_at.isoformat(),
+    }
+
+
+async def _ingest_company_async(
     company_id: str,
     user: Optional[str] = None,
     enrich_backgrounds: bool = True,
+    force_refresh: bool = False,
 ) -> dict:
-    """
-    Single entrypoint for company data ingestion.
-
-    Orchestrates all data fetching and database writes.
-    NO LLM calls - pure data ingestion.
-
-    Args:
-        company_id: Company URL or domain
-        user: Optional user identifier for tracking
-        enrich_backgrounds: If True (default), enrich founder backgrounds using Swarm API
-
-    Returns:
-        Dict with ingestion results
-    """
+    """Concurrent ingest: fan out the 5 independent external fetches via asyncio.gather."""
     normalized_id = normalize_company_id(company_id)
     tracker = get_tracker()
+
+    # TTL freshness check — skip external calls when briefing is recent
+    if not force_refresh:
+        observed_at = _briefing_freshness(normalized_id)
+        if observed_at is not None:
+            ttl_hours = _ingest_ttl_hours()
+            now_utc = datetime.now(timezone.utc)
+            if observed_at.tzinfo is None:
+                observed_at = observed_at.replace(tzinfo=timezone.utc)
+            age = now_utc - observed_at
+            if age < timedelta(hours=ttl_hours):
+                logger.info(
+                    f"Briefing for {normalized_id} is fresh "
+                    f"(observed_at={observed_at.isoformat()}, age={age}, ttl={ttl_hours}h), "
+                    f"skipping ingest"
+                )
+                return _cached_ingest_result(normalized_id, observed_at)
 
     results = {
         "company_id": normalized_id,
@@ -1472,84 +1545,91 @@ def ingest_company(
         "errors": [],
     }
 
-    # 1. Fetch company profile
-    try:
-        company_core = get_company_profile(company_id)
-        results["company_name"] = company_core.company_name
-        results["company_core"] = True
+    # All five external fetches run concurrently — each only takes company_id.
+    # get_competitors internally calls sync_competitors_to_supabase, so no
+    # separate write step is needed for competitors.
+    profile_r, founders_r, signals_r, news_r, competitors_r = await asyncio.gather(
+        asyncio.to_thread(get_company_profile, company_id),
+        asyncio.to_thread(get_founders, company_id),
+        asyncio.to_thread(get_key_signals, company_id),
+        asyncio.to_thread(get_recent_news, company_id),
+        asyncio.to_thread(get_competitors, company_id),
+        return_exceptions=True,
+    )
 
-        # Sync company to Supabase for Lovable UI
-        try:
-            sync_company_to_supabase(company_core)
-        except Exception as e:
-            results["errors"].append(f"Company Supabase sync: {str(e)}")
-            logger.error(f"Failed to sync company to Supabase for {company_id}: {e}")
-    except Exception as e:
-        results["errors"].append(f"Company profile: {str(e)}")
-        logger.error(f"Failed to ingest company profile for {company_id}: {e}")
+    # Profile is required — bail if it failed.
+    if isinstance(profile_r, Exception):
+        results["errors"].append(f"Company profile: {profile_r}")
+        logger.error(f"Failed to ingest company profile for {company_id}: {profile_r}")
         return results
 
-    # 2. Fetch founders (sync to Supabase immediately so enrichment can read them)
-    try:
-        founders = get_founders(company_id)
+    company_core = profile_r
+    results["company_name"] = company_core.company_name
+    results["company_core"] = True
+
+    # Stage Supabase writes for parallel execution.
+    write_tasks: list = [asyncio.to_thread(sync_company_to_supabase, company_core)]
+
+    if isinstance(founders_r, Exception):
+        results["errors"].append(f"Founders: {founders_r}")
+        logger.error(f"Failed to ingest founders for {company_id}: {founders_r}")
+        founders = []
+    else:
+        founders = founders_r
         results["founders_count"] = len(founders)
         if founders:
-            try:
-                sync_founders_to_supabase(founders, company_name=results.get("company_name"))
-            except Exception as e:
-                results["errors"].append(f"Founder Supabase sync: {str(e)}")
-                logger.error(f"Failed to sync founders to Supabase for {company_id}: {e}")
-    except Exception as e:
-        results["errors"].append(f"Founders: {str(e)}")
-        logger.error(f"Failed to ingest founders for {company_id}: {e}")
+            write_tasks.append(
+                asyncio.to_thread(
+                    sync_founders_to_supabase, founders, company_name=results.get("company_name")
+                )
+            )
 
-    # 2b. Enrich founder backgrounds (reads from Supabase, writes enriched rows back)
+    if isinstance(signals_r, Exception):
+        results["errors"].append(f"Signals: {signals_r}")
+        logger.error(f"Failed to ingest signals for {company_id}: {signals_r}")
+    else:
+        results["signals_count"] = len(signals_r)
+        if signals_r:
+            write_tasks.append(asyncio.to_thread(sync_signals_to_supabase, signals_r))
+
+    if isinstance(news_r, Exception):
+        results["errors"].append(f"News: {news_r}")
+        logger.error(f"Failed to ingest news for {company_id}: {news_r}")
+    else:
+        results["news_count"] = len(news_r)
+        if news_r:
+            write_tasks.append(asyncio.to_thread(sync_news_to_supabase, news_r, normalized_id))
+
+    if isinstance(competitors_r, Exception):
+        results["errors"].append(f"Competitors: {competitors_r}")
+        logger.error(f"Failed to fetch competitors for {company_id}: {competitors_r}")
+    else:
+        results["competitors_count"] = len(competitors_r)
+
+    # Run all Supabase writes concurrently. Founders sync must finish before
+    # enrich_founder_backgrounds (which reads from Supabase), and gather()
+    # waits for all tasks before returning.
+    write_results = await asyncio.gather(*write_tasks, return_exceptions=True)
+    write_labels = ["Company"] + (
+        ["Founder"] if isinstance(founders_r, list) and founders_r else []
+    ) + (
+        ["Signals"] if not isinstance(signals_r, Exception) and signals_r else []
+    ) + (
+        ["News"] if not isinstance(news_r, Exception) and news_r else []
+    )
+    for label, wr in zip(write_labels, write_results):
+        if isinstance(wr, Exception):
+            results["errors"].append(f"{label} Supabase sync: {wr}")
+            logger.error(f"{label} Supabase sync failed for {company_id}: {wr}")
+
+    # Enrich backgrounds last — depends on founders being synced.
     if enrich_backgrounds and results["founders_count"] > 0:
         try:
-            enrichment = enrich_founder_backgrounds(company_id)
+            enrichment = await asyncio.to_thread(enrich_founder_backgrounds, company_id)
             results["founders_enriched"] = enrichment["enriched_count"]
         except Exception as e:
             results["errors"].append(f"Founder backgrounds: {str(e)}")
             logger.error(f"Failed to enrich founder backgrounds for {company_id}: {e}")
-
-    # 3. Fetch key signals
-    try:
-        signals = get_key_signals(company_id)
-        results["signals_count"] = len(signals)
-
-        if signals:
-            try:
-                sync_signals_to_supabase(signals)
-            except Exception as e:
-                results["errors"].append(f"Signals Supabase sync: {str(e)}")
-                logger.error(f"Failed to sync signals to Supabase for {company_id}: {e}")
-    except Exception as e:
-        results["errors"].append(f"Signals: {str(e)}")
-        logger.error(f"Failed to ingest signals for {company_id}: {e}")
-
-    # 4. Fetch recent news
-    try:
-        news = get_recent_news(company_id)
-        results["news_count"] = len(news)
-
-        # Sync news to Supabase for Lovable UI
-        if news:
-            try:
-                sync_news_to_supabase(news, normalized_id)
-            except Exception as e:
-                results["errors"].append(f"News Supabase sync: {str(e)}")
-                logger.error(f"Failed to sync news to Supabase for {company_id}: {e}")
-    except Exception as e:
-        results["errors"].append(f"News: {str(e)}")
-        logger.error(f"Failed to ingest news for {company_id}: {e}")
-
-    # 5. Fetch competitors
-    try:
-        competitors = get_competitors(company_id)
-        results["competitors_count"] = len(competitors)
-    except Exception as e:
-        results["errors"].append(f"Competitors: {str(e)}")
-        logger.error(f"Failed to fetch competitors for {company_id}: {e}")
 
     logger.info(
         f"Ingestion complete for {results['company_name']}: "
@@ -1559,7 +1639,6 @@ def ingest_company(
         f"competitors={results['competitors_count']}"
     )
 
-    # Track usage
     tracker.log_usage(
         company_id=normalized_id,
         action="ingest",
@@ -1570,10 +1649,55 @@ def ingest_company(
             "signals_count": results["signals_count"],
             "competitors_count": results["competitors_count"],
             "errors": results["errors"],
-        }
+        },
     )
 
     return results
+
+
+def ingest_company(
+    company_id: str,
+    user: Optional[str] = None,
+    enrich_backgrounds: bool = True,
+    force_refresh: bool = False,
+) -> dict:
+    """
+    Single entrypoint for company data ingestion.
+
+    Orchestrates all data fetching and database writes.
+    NO LLM calls - pure data ingestion.
+
+    Args:
+        company_id: Company URL or domain
+        user: Optional user identifier for tracking
+        enrich_backgrounds: If True (default), enrich founder backgrounds using Harmonic
+        force_refresh: If True, bypass the TTL freshness check on briefing_companies
+
+    Returns:
+        Dict with ingestion results
+    """
+    # Sync wrapper: most callers (including the outreach generator) are sync.
+    # asyncio.run creates a new event loop in the calling thread, which is safe
+    # in the worker-thread context the generator runs under.
+    try:
+        running_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        running_loop = None
+
+    if running_loop is not None:
+        # Caller is already in an event loop — schedule on it via a fresh task
+        # in a thread to avoid nested-loop errors.
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(
+                lambda: asyncio.run(
+                    _ingest_company_async(company_id, user, enrich_backgrounds, force_refresh)
+                )
+            ).result()
+
+    return asyncio.run(
+        _ingest_company_async(company_id, user, enrich_backgrounds, force_refresh)
+    )
 
 
 # =============================================================================

@@ -249,8 +249,19 @@ class PromptRegistry:
             model="claude-sonnet-4-5-20250929",
             provider=ModelProvider.ANTHROPIC,
             temperature=0.3,
-            description="Claude Sonnet for personalized outreach message generation",
+            description="Claude Sonnet for personalized outreach message generation (call 1 of 2 — draft)",
             version="2.0.0",
+        ))
+
+        # Outreach cleanup pass (Claude Haiku — scrubs surface-level AI tells
+        # from the draft without touching personalization or structure).
+        self.register_model_config(ModelConfig(
+            name="outreach_cleanup",
+            model="claude-haiku-4-5-20251001",
+            provider=ModelProvider.ANTHROPIC,
+            temperature=0.1,
+            description="Claude Haiku for de-LLM cleanup of outreach drafts (call 2 of 2 — register/AI-tell scrub)",
+            version="1.0.0",
         ))
 
     def _register_default_prompts(self):
